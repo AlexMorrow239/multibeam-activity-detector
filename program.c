@@ -1,4 +1,4 @@
-#include "NIDAQmx.h" // NI DAQ driver library
+#include "include/NIDAQmx.h" // NI DAQ driver library
 #include <stdio.h> // Standard input/output library
 #include <stdbool.h> // Standard boolean library
 #include <windows.h> // Windows API library, used for Sleep function
