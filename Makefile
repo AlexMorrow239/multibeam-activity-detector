@@ -4,8 +4,8 @@ WINCC = $(MINGW)
 
 # Project directories
 PROJECT_DIR = $(shell pwd)
-INCLUDE_DIR = $(PROJECT_DIR)/NI_Project/include
-LIB_DIR = $(PROJECT_DIR)/NI_Project/lib
+INCLUDE_DIR = $(PROJECT_DIR)/include
+LIB_DIR = $(PROJECT_DIR)/lib
 
 # Target executable name
 TARGET = program.exe
