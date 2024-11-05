@@ -87,7 +87,7 @@
 #endif
 #ifndef _NI_uInt64_DEFINED_
 #define _NI_uInt64_DEFINED_
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__)
 	typedef unsigned long long uInt64;
 #else
 	typedef unsigned __int64   uInt64;
