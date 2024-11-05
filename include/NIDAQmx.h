@@ -79,10 +79,8 @@
 #endif
 #ifndef _NI_int64_DEFINED_
 #define _NI_int64_DEFINED_
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW64__)
 	typedef long long int      int64;
-#else
-	typedef __int64            int64;
 #endif
 #endif
 #ifndef _NI_uInt64_DEFINED_
