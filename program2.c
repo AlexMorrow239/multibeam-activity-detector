@@ -1,4 +1,4 @@
-#include "include/NIDAQmx.h"
+#include <NIDAQmx.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <windows.h>
@@ -45,12 +45,12 @@ int initializeDevice(void) {
     
     // Configure digital input (P0.0-P0.4)
     DAQmxErrChk(DAQmxCreateTask("InputTask", &state.inputTask));
-    DAQmxErrChk(DAQmxCreateDIChan(state.inputTask, "Dev1/port0/line0:4", "",
+    DAQmxErrChk(DAQmxCreateDIChan(state.inputTask, "Dev2/port0/line0:4", "",
                                  DAQmx_Val_ChanForAllLines));
     
     // Configure digital output (P1.0-P1.1)
     DAQmxErrChk(DAQmxCreateTask("OutputTask", &state.outputTask));
-    DAQmxErrChk(DAQmxCreateDOChan(state.outputTask, "Dev1/port1/line0:1", "",
+    DAQmxErrChk(DAQmxCreateDOChan(state.outputTask, "Dev2/port1/line0:1", "",
                                  DAQmx_Val_ChanForAllLines));
     
     return 0;
@@ -67,7 +67,7 @@ void initializeState(void) {
     state.resetActive = false;
     state.clockHigh = false;
     state.currentTube = 0;
-    
+
     InitializeCriticalSection(&state.mutex);
     InitializeConditionVariable(&state.resetCond);
     InitializeConditionVariable(&state.clockCond);
@@ -80,12 +80,17 @@ void initializeState(void) {
 }
 
 // Process data read from a tube
-void processData(unsigned char data[], int tubeNumber) {
+void processData(uInt8 data[], int tubeNumber) {
     EnterCriticalSection(&tubeReadings[tubeNumber].mutex);
-    
+    //printf("%d  ", *data);
+    printf("1. %d  ", data[0]);
+    printf("2. %d  ", data[1]);
+    printf("3. %d  ", data[2]);
+    printf("4. %d  ", data[3]);
+    printf("5. %d  ", data[4]);
     if (data[4] == 0) {  // DV is LOW - normal position reading
         tubeReadings[tubeNumber].value = 
-            data[0] + (data[1] << 1) + (data[2] << 2) + (data[3] << 3);
+            data[0] + (data[1] * 1) + (data[2] * 4) + (data[3] * 8);
         tubeReadings[tubeNumber].isEating = false;
     }
     else {  // DV is HIGH - check for eating condition
@@ -100,7 +105,7 @@ void processData(unsigned char data[], int tubeNumber) {
 
 // Output thread function - handles reset and clock signals
 unsigned int __stdcall outputThread(void* arg) {
-    unsigned char outputData[PORT1_LINE_COUNT];
+    uInt8 outputData[PORT1_LINE_COUNT];
     int i;
     
     while (state.running) {
@@ -154,7 +159,7 @@ unsigned int __stdcall outputThread(void* arg) {
 
 // Input thread function - reads data from tubes
 unsigned int __stdcall inputThread(void* arg) {
-    unsigned char inputData[PORT0_LINE_COUNT];
+    uInt8 inputData[PORT0_LINE_COUNT];
     int i;
     
     while (state.running) {
@@ -247,7 +252,7 @@ int main(void) {
     printf("Select timebase (milliseconds):\n");
     printf("1. 0.01\n2. 0.1\n3. 1.0\n4. 10.0\n");
     printf("Choice: ");
-    scanf(" %c", &choice);
+    scanf_s(" %c", &choice, 1);
     
     switch(choice) {
         case '1': state.timebase = 0.00001f; break;
@@ -279,8 +284,7 @@ int main(void) {
     
     // Delete critical sections
     DeleteCriticalSection(&state.mutex);
-    DeleteCriticalSection(&state.resetCond);
-    DeleteCriticalSection(&state.clockCond);
+
     for (int i = 0; i < NUM_TUBES; i++) {
         DeleteCriticalSection(&tubeReadings[i].mutex);
     }
