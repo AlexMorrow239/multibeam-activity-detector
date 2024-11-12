@@ -1,47 +1,46 @@
 #include "include/NIDAQmx.h"
-#include <iostream>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <array>
-#include <chrono>
-#include <atomic>
+#include <stdio.h>
+#include <stdbool.h>
+#include <windows.h>
+#include <process.h>
+#include <stdint.h>
+#include <string.h>
 
 // Constants
-constexpr int NUM_TUBES = 16;
-constexpr int PORT0_LINE_COUNT = 5;
-constexpr int PORT1_LINE_COUNT = 2;
+#define NUM_TUBES 16
+#define PORT0_LINE_COUNT 5
+#define PORT1_LINE_COUNT 2
 
 // Shared state structure
-struct SharedState {
-    TaskHandle inputTask = 0;
-    TaskHandle outputTask = 0;
-    float timebase = 0.0002f;  // Default 0.2ms
-    std::atomic<bool> running{true};
-    std::mutex mutex;
-    std::condition_variable resetCond;    // Signals when reset pulse occurs
-    std::condition_variable clockCond;    // Signals clock transitions
-    bool resetActive = false;             // Indicates reset pulse is active
-    bool clockHigh = false;              // Indicates clock state
-    int currentTube = 0;                 // Current tube being read
-};
+typedef struct {
+    TaskHandle inputTask;
+    TaskHandle outputTask;
+    float timebase;
+    volatile bool running;
+    CRITICAL_SECTION mutex;
+    CONDITION_VARIABLE resetCond;    // Signals when reset pulse occurs
+    CONDITION_VARIABLE clockCond;    // Signals clock transitions
+    bool resetActive;                // Indicates reset pulse is active
+    bool clockHigh;                 // Indicates clock state
+    int currentTube;               // Current tube being read
+} SharedState;
 
 // Tube reading structure
-struct TubeReading {
-    int value = 0;
-    bool isEating = false;
-    std::mutex mutex;
-};
+typedef struct {
+    int value;
+    bool isEating;
+    CRITICAL_SECTION mutex;
+} TubeReading;
 
 // Global variables
-std::array<TubeReading, NUM_TUBES> tubeReadings;
+TubeReading tubeReadings[NUM_TUBES];
 SharedState state;
 
 // Error checking macro
 #define DAQmxErrChk(functionCall) if( DAQmxFailed(error=(functionCall)) ) goto Error; else
 
 // Initialize the DAQ device
-int initializeDevice() {
+int initializeDevice(void) {
     int error = 0;
     
     // Configure digital input (P0.0-P0.4)
@@ -60,9 +59,29 @@ Error:
     return error;
 }
 
+// Initialize shared state
+void initializeState(void) {
+    int i;
+    state.timebase = 0.0002f;  // Default 0.2ms
+    state.running = true;
+    state.resetActive = false;
+    state.clockHigh = false;
+    state.currentTube = 0;
+    
+    InitializeCriticalSection(&state.mutex);
+    InitializeConditionVariable(&state.resetCond);
+    InitializeConditionVariable(&state.clockCond);
+    
+    for (i = 0; i < NUM_TUBES; i++) {
+        tubeReadings[i].value = 0;
+        tubeReadings[i].isEating = false;
+        InitializeCriticalSection(&tubeReadings[i].mutex);
+    }
+}
+
 // Process data read from a tube
-void processData(const std::array<unsigned char, PORT0_LINE_COUNT>& data, int tubeNumber) {
-    std::lock_guard<std::mutex> lock(tubeReadings[tubeNumber].mutex);
+void processData(unsigned char data[], int tubeNumber) {
+    EnterCriticalSection(&tubeReadings[tubeNumber].mutex);
     
     if (data[4] == 0) {  // DV is LOW - normal position reading
         tubeReadings[tubeNumber].value = 
@@ -75,177 +94,154 @@ void processData(const std::array<unsigned char, PORT0_LINE_COUNT>& data, int tu
             tubeReadings[tubeNumber].isEating = true;
         }
     }
+    
+    LeaveCriticalSection(&tubeReadings[tubeNumber].mutex);
 }
 
 // Output thread function - handles reset and clock signals
-void outputThreadFunc() {
-    std::array<unsigned char, PORT1_LINE_COUNT> outputData{};
+unsigned int __stdcall outputThread(void* arg) {
+    unsigned char outputData[PORT1_LINE_COUNT];
+    int i;
     
     while (state.running) {
         // Send reset pulse (P1.0 HIGH for 3Tb)
-        {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            outputData[0] = 1;  // Reset high
-            outputData[1] = 0;  // Clock low
-            state.resetActive = true;
-            state.currentTube = 0;
-        }
-        state.resetCond.notify_all();
+        EnterCriticalSection(&state.mutex);
+        outputData[0] = 1;  // Reset high
+        outputData[1] = 0;  // Clock low
+        state.resetActive = true;
+        state.currentTube = 0;
+        WakeAllConditionVariable(&state.resetCond);
+        LeaveCriticalSection(&state.mutex);
         
         DAQmxWriteDigitalLines(state.outputTask, 1, 1, state.timebase*3.0,
-                              DAQmx_Val_GroupByChannel, outputData.data(), nullptr, nullptr);
+                              DAQmx_Val_GroupByChannel, outputData, NULL, NULL);
         
         // Reset low
         outputData[0] = 0;
         DAQmxWriteDigitalLines(state.outputTask, 1, 1, state.timebase,
-                              DAQmx_Val_GroupByChannel, outputData.data(), nullptr, nullptr);
+                              DAQmx_Val_GroupByChannel, outputData, NULL, NULL);
         
-        {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            state.resetActive = false;
-        }
+        EnterCriticalSection(&state.mutex);
+        state.resetActive = false;
+        LeaveCriticalSection(&state.mutex);
         
         // Clock cycles for all tubes
-        for (int i = 0; i < NUM_TUBES; i++) {
+        for (i = 0; i < NUM_TUBES; i++) {
             // Clock high
-            {
-                std::lock_guard<std::mutex> lock(state.mutex);
-                outputData[1] = 1;
-                state.clockHigh = true;
-            }
-            state.clockCond.notify_all();
+            EnterCriticalSection(&state.mutex);
+            outputData[1] = 1;
+            state.clockHigh = true;
+            WakeAllConditionVariable(&state.clockCond);
+            LeaveCriticalSection(&state.mutex);
             
             DAQmxWriteDigitalLines(state.outputTask, 1, 1, state.timebase*2.5,
-                                  DAQmx_Val_GroupByChannel, outputData.data(), nullptr, nullptr);
+                                  DAQmx_Val_GroupByChannel, outputData, NULL, NULL);
             
             // Clock low
-            {
-                std::lock_guard<std::mutex> lock(state.mutex);
-                outputData[1] = 0;
-                state.clockHigh = false;
-            }
-            state.clockCond.notify_all();
+            EnterCriticalSection(&state.mutex);
+            outputData[1] = 0;
+            state.clockHigh = false;
+            WakeAllConditionVariable(&state.clockCond);
+            LeaveCriticalSection(&state.mutex);
             
             DAQmxWriteDigitalLines(state.outputTask, 1, 1, state.timebase*2.5,
-                                  DAQmx_Val_GroupByChannel, outputData.data(), nullptr, nullptr);
+                                  DAQmx_Val_GroupByChannel, outputData, NULL, NULL);
         }
     }
+    
+    return 0;
 }
 
 // Input thread function - reads data from tubes
-void inputThreadFunc() {
-    std::array<unsigned char, PORT0_LINE_COUNT> inputData{};
+unsigned int __stdcall inputThread(void* arg) {
+    unsigned char inputData[PORT0_LINE_COUNT];
+    int i;
     
     while (state.running) {
         // Wait for reset pulse
-        {
-            std::unique_lock<std::mutex> lock(state.mutex);
-            state.resetCond.wait(lock, []{return state.resetActive;});
+        EnterCriticalSection(&state.mutex);
+        while (!state.resetActive) {
+            SleepConditionVariableCS(&state.resetCond, &state.mutex, INFINITE);
         }
+        LeaveCriticalSection(&state.mutex);
         
         // Process all tubes
-        for (int i = 0; i < NUM_TUBES; i++) {
+        for (i = 0; i < NUM_TUBES; i++) {
             // Wait for clock to go high
-            {
-                std::unique_lock<std::mutex> lock(state.mutex);
-                state.clockCond.wait(lock, []{return state.clockHigh;});
+            EnterCriticalSection(&state.mutex);
+            while (!state.clockHigh) {
+                SleepConditionVariableCS(&state.clockCond, &state.mutex, INFINITE);
             }
+            LeaveCriticalSection(&state.mutex);
             
             // Wait 1Tb then read data
-            std::this_thread::sleep_for(std::chrono::microseconds(
-                static_cast<int>(state.timebase * 1000000)));
-                
+            Sleep((DWORD)(state.timebase * 1000));
             DAQmxReadDigitalLines(state.inputTask, 1, state.timebase*2.0,
-                                DAQmx_Val_GroupByChannel, inputData.data(),
-                                PORT0_LINE_COUNT, nullptr, nullptr, nullptr);
+                                DAQmx_Val_GroupByChannel, inputData,
+                                PORT0_LINE_COUNT, NULL, NULL, NULL);
             
             // Process the data
             processData(inputData, i);
             
             // Wait for clock to go low
-            {
-                std::unique_lock<std::mutex> lock(state.mutex);
-                state.clockCond.wait(lock, []{return !state.clockHigh;});
+            EnterCriticalSection(&state.mutex);
+            while (state.clockHigh) {
+                SleepConditionVariableCS(&state.clockCond, &state.mutex, INFINITE);
             }
+            LeaveCriticalSection(&state.mutex);
         }
-    }
-}
-
-// Display thread function - updates the console output
-void displayThreadFunc() {
-    while (state.running) {
-        std::cout << "\033[2J\033[H";  // Clear screen and move cursor to top
-        std::cout << "Multibeam Activity Detector - Real-time Monitoring\n";
-        std::cout << "===============================================\n\n";
-        std::cout << "Tube | Position | Status | Activity\n";
-        std::cout << "-----|----------|---------|----------\n";
-        
-        for (int i = 0; i < NUM_TUBES; i++) {
-            std::lock_guard<std::mutex> lock(tubeReadings[i].mutex);
-            
-            std::cout << std::setw(4) << i + 1 << " | ";
-            
-            if (tubeReadings[i].isEating) {
-                std::cout << std::setw(8) << 1 << " | EATING  | Feeding at position 1\n";
-            } else if (tubeReadings[i].value > 0) {
-                std::cout << std::setw(8) << tubeReadings[i].value 
-                         << " | ACTIVE  | Moving at position " 
-                         << tubeReadings[i].value << "\n";
-            } else {
-                std::cout << std::setw(8) << "-" << " | IDLE    | No activity detected\n";
-            }
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-}
-
-int main() {
-    int error = initializeDevice();
-    if (error) {
-        std::cerr << "Failed to initialize device. Error: " << error << "\n";
-        return error;
-    }
-    
-    // Configure timebase
-    std::cout << "Select timebase (milliseconds):\n";
-    std::cout << "1. 0.01\n2. 0.1\n3. 1.0\n4. 10.0\n";
-    std::cout << "Choice: ";
-    char choice;
-    std::cin >> choice;
-    
-    switch(choice) {
-        case '1': state.timebase = 0.00001f; break;
-        case '2': state.timebase = 0.0001f; break;
-        case '3': state.timebase = 0.001f; break;
-        case '4': state.timebase = 0.01f; break;
-        default:  std::cout << "Using default timebase (0.2ms)\n";
-    }
-    
-    // Create threads
-    std::thread outputThread(outputThreadFunc);
-    std::thread inputThread(inputThreadFunc);
-    std::thread displayThread(displayThreadFunc);
-    
-    std::cout << "\nPress Enter to stop acquisition...\n";
-    std::cin.ignore();
-    std::cin.get();
-    
-    // Stop acquisition and join threads
-    state.running = false;
-    outputThread.join();
-    inputThread.join();
-    displayThread.join();
-    
-    // Cleanup
-    if (state.inputTask != 0) {
-        DAQmxStopTask(state.inputTask);
-        DAQmxClearTask(state.inputTask);
-    }
-    if (state.outputTask != 0) {
-        DAQmxStopTask(state.outputTask);
-        DAQmxClearTask(state.outputTask);
     }
     
     return 0;
 }
+
+// Display thread function - updates the console output
+unsigned int __stdcall displayThread(void* arg) {
+    int i;
+    
+    while (state.running) {
+        printf("\033[2J\033[H");  // Clear screen and move cursor to top
+        printf("Multibeam Activity Detector - Real-time Monitoring\n");
+        printf("===============================================\n\n");
+        printf("Tube | Position | Status | Activity\n");
+        printf("-----|----------|---------|----------\n");
+        
+        for (i = 0; i < NUM_TUBES; i++) {
+            EnterCriticalSection(&tubeReadings[i].mutex);
+            
+            printf("%4d | ", i + 1);
+            
+            if (tubeReadings[i].isEating) {
+                printf("%8d | EATING  | Feeding at position 1\n", 1);
+            } else if (tubeReadings[i].value > 0) {
+                printf("%8d | ACTIVE  | Moving at position %d\n",
+                       tubeReadings[i].value,
+                       tubeReadings[i].value);
+            } else {
+                printf("%8s | IDLE    | No activity detected\n", "-");
+            }
+            
+            LeaveCriticalSection(&tubeReadings[i].mutex);
+        }
+        
+        Sleep(100);  // Update display every 100ms
+    }
+    
+    return 0;
+}
+
+int main(void) {
+    int error;
+    HANDLE threads[3];
+    char choice;
+    
+    error = initializeDevice();
+    if (error) {
+        printf("Failed to initialize device. Error: %d\n", error);
+        return error;
+    }
+    
+    initializeState();
+    
+    // Configure timebase
+    printf("Select timebase (
