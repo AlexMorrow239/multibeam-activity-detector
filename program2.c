@@ -244,4 +244,56 @@ int main(void) {
     initializeState();
     
     // Configure timebase
-    printf("Select timebase (
+    printf("Select timebase (milliseconds):\n");
+    printf("1. 0.01\n2. 0.1\n3. 1.0\n4. 10.0\n");
+    printf("Choice: ");
+    scanf(" %c", &choice);
+    
+    switch(choice) {
+        case '1': state.timebase = 0.00001f; break;
+        case '2': state.timebase = 0.0001f; break;
+        case '3': state.timebase = 0.001f; break;
+        case '4': state.timebase = 0.01f; break;
+        default:  printf("Using default timebase (0.2ms)\n");
+    }
+    
+    // Create threads
+    threads[0] = (HANDLE)_beginthreadex(NULL, 0, outputThread, NULL, 0, NULL);
+    threads[1] = (HANDLE)_beginthreadex(NULL, 0, inputThread, NULL, 0, NULL);
+    threads[2] = (HANDLE)_beginthreadex(NULL, 0, displayThread, NULL, 0, NULL);
+    
+    printf("\nPress Enter to stop acquisition...\n");
+    getchar();
+    getchar();
+    
+    // Stop acquisition and wait for threads
+    state.running = false;
+    WakeAllConditionVariable(&state.resetCond);
+    WakeAllConditionVariable(&state.clockCond);
+    WaitForMultipleObjects(3, threads, TRUE, INFINITE);
+    
+    // Close thread handles
+    CloseHandle(threads[0]);
+    CloseHandle(threads[1]);
+    CloseHandle(threads[2]);
+    
+    // Delete critical sections
+    DeleteCriticalSection(&state.mutex);
+    DeleteCriticalSection(&state.resetCond);
+    DeleteCriticalSection(&state.clockCond);
+    for (int i = 0; i < NUM_TUBES; i++) {
+        DeleteCriticalSection(&tubeReadings[i].mutex);
+    }
+    
+    // Cleanup DAQ tasks
+    if (state.inputTask != 0) {
+        DAQmxStopTask(state.inputTask);
+        DAQmxClearTask(state.inputTask);
+    }
+    if (state.outputTask != 0) {
+        DAQmxStopTask(state.outputTask);
+        DAQmxClearTask(state.outputTask);
+    }
+    
+    return 0;
+}
